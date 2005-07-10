@@ -2,9 +2,14 @@ use strict;
 use warnings;
 use Crypt::Dining;
 
+my $message = undef;
+if ($ARGV[0] !~ /^[0-9\/]$/) {
+	$message = shift @ARGV;
+}
+
 my $dc = new Crypt::Dining(
 	# LocalAddr	=> '192.168.3.16',
-	Peers		=> [ '123.45.6.67', '62.53.7.2', '12.6.3.123' ],
+	Peers		=> \@ARGV,
 );
 
-$dc->round;
+$dc->round($message);

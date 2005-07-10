@@ -3,7 +3,6 @@ WriteMakefile(
     NAME			=> 'Crypt::Dining',
     VERSION_FROM	=> 'lib/Crypt/Dining.pm',
     PREREQ_PM		=> {
-			'YAML'						=> 0,
 			'Crypt::Random'				=> 0,
 			'Net::Address::IPv4::Local'	=> 0,
 					},

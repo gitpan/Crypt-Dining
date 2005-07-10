@@ -5,13 +5,19 @@ use warnings;
 use vars qw($VERSION $PORT $PACKETSZ);
 # use Data::Dumper;
 use IO::Socket::INET;
-use Crypt::Random qw(makerandom);
-use YAML;
+use Crypt::Random qw(makerandom_octet);
 use Net::Address::IPv4::Local;
 
-$VERSION = '1.00';
+$VERSION = '1.01';
 $PORT = 17355;
 $PACKETSZ = 1024;
+
+sub debug {
+	my ($self, @msg) = @_;
+	if ($self->{Debug}) {
+		print "[$$] ", @msg, "\n";
+	}
+}
 
 sub new {
 	my $class = shift;
@@ -28,6 +34,10 @@ sub new {
 	my $this = $self->{LocalAddr} . ":" . $self->{LocalPort};
 
 	my @peers = @{ $self->{Peers} };
+	unless (@peers) {
+		die "No peers given - protocol will be a no-op";
+	}
+
 	foreach (0..$#peers) {
 		$peers[$_] .= ":$PORT" unless $peers[$_] =~ /:/;
 	}
@@ -60,12 +70,16 @@ sub new {
 	$self->{NextAddr} = $1;
 	$self->{NextPort} = $2;
 
+
 	return bless $self, $class;
 }
 
 sub socket_udp {
 	my ($self) = @_;
 	unless ($self->{SocketUdp}) {
+		$self->debug(
+			"Creating socket $self->{LocalAddr}:$self->{LocalPort}"
+				);
 		$self->{SocketUdp} = new IO::Socket::INET(
 			Proto		=> "udp",
 			LocalAddr	=> $self->{LocalAddr},
@@ -86,7 +100,8 @@ sub listen_prev {
 sub send_next {
 	my ($self, $data) = @_;
 	my $socket = $self->socket_udp();
-	my $addr = sockaddr_in($self->{NextPort}, inet_aton($self->{NextAddr}));
+	$self->debug("Send coin to $self->{NextAddr}:$self->{NextPort}");
+	my $addr = pack_sockaddr_in($self->{NextPort}, inet_aton($self->{NextAddr}));
 	return $socket->send($data, 0, $addr);
 }
 
@@ -94,9 +109,10 @@ sub send_all {
 	my ($self, $data) = @_;
 	my $socket = $self->socket_udp();
 	foreach (@{ $self->{Peers} }) {
+		$self->debug("Send hand to $_");
 		m/(.*):(.*)/ or die "Invalid peer: $_: No host:port";
 		my ($host, $port) = ($1, $2);
-		my $addr = sockaddr_in($port, inet_aton($host));
+		my $addr = pack_sockaddr_in($port, inet_aton($host));
 		$socket->send($data, 0, $addr);
 	}
 }
@@ -106,10 +122,12 @@ sub recv_prev {
 	my $socket = $self->socket_udp();
 
 	my $data;
-	my $addr = $socket->recv($data, $PACKETSZ);
-	my ($port, $iaddr) = sockaddr_in($addr);
-	die "Unexpected packet from $iaddr"
-			unless $iaddr eq $self->{PrevAddr};
+	my $addr = $socket->recv($data, $PACKETSZ + 4);
+	$self->debug("Got " . length($data) . " bytes from prev");
+	my ($port, $iaddr) = unpack_sockaddr_in($addr);
+	my $aaddr = inet_ntoa($iaddr);
+	die "Unexpected packet from $aaddr:$port"
+			unless $aaddr eq $self->{PrevAddr};
 	return $data;
 }
 
@@ -120,7 +138,7 @@ sub recv_all {
 	my %data;
 	foreach (@{ $self->{Peers} }) {
 		my $data;
-		my $addr = $socket->recv($data, $PACKETSZ);
+		my $addr = $socket->recv($data, $PACKETSZ + 4);
 		$data{$_} = $data;
 	}
 
@@ -130,40 +148,44 @@ sub recv_all {
 sub round {
 	my ($self, $message) = @_;
 
-	my $random = makerandom(
-		Size		=> 8 * $PACKETSZ,	# 1Kb
+	my $random = makerandom_octet(
+		Length		=> $PACKETSZ,
 		Strength	=> 0,
 	);
+	# print "Random is $random\n";
 
-	my %packet = (
-		Type	=> "coin",
-		Value	=> $random,
-	);
-	$self->send_next(Dump(\%packet));
+	$self->listen_prev();
+	sleep 1;
 
-	my $packetref = Load($self->recv_prev());
-	die "Didn't get a coin packet"
-			unless $packetref->{Type} eq 'coin';
+	$self->send_next("coin" . $random);
+
+	my $packet = $self->recv_prev();
+	unless (substr($packet, 0, 4) eq 'coin') {
+		die "Didn't get a coin packet: got " . substr($packet, 0, 4);
+	}
 	die "Bad length for received coin data"
-			unless $packetref->{Value} eq $PACKETSZ;
-	my $store = $packetref->{Value} ^ $random;
+			unless length $packet eq $PACKETSZ + 4;
+	my $store = substr($packet, 4) ^ $random;
 	$store ^= $message if $message;
 
-	%packet = (
-		Type	=> "hand",
-		Value	=> $store,
-	);
-	$self->send_all(Dump(\%packet));
+	$self->debug("====");
+	# sleep 1;
+
+	# return;
+
+	$self->send_all("hand" . $store);
 
 	my %answers = $self->recv_all();
 	my $answer = $store;
 	foreach (keys %answers) {
-		$packetref = Load($answers{$_});
-		die "Didn't get a hand packet from $_"
-				unless $packetref->{Type} eq 'hand';
+		$packet = $answers{$_};
+		unless (substr($packet, 0, 4) eq 'hand') {
+			die "Didn't get a hand packet from $_: got " .
+					substr($packet, 0, 4);
+		}
 		die "Bad length for received hand data"
-				unless $packetref->{Value} eq $PACKETSZ;
-		$answer ^= $packetref->{Value};
+				unless length $packet eq $PACKETSZ + 4;
+		$answer ^= substr($packet, 4);
 	}
 
 	return $answer;
